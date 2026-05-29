@@ -15,7 +15,33 @@ interface ChatSession {
   createdAt: number;
 }
 
+interface UserProfile {
+  id: string;
+  name: string;
+  avatarColor: string;
+  avatarEmoji: string;
+  pin?: string;
+  createdAt: number;
+}
+
 export default function Chat() {
+  // Profile state
+  const [profiles, setProfiles] = useState<UserProfile[]>([]);
+  const [activeProfile, setActiveProfile] = useState<UserProfile | null>(null);
+  const [showProfileSelector, setShowProfileSelector] = useState<boolean>(true);
+  const [profileModalMode, setProfileModalMode] = useState<'create' | 'edit' | null>(null);
+  const [editingProfile, setEditingProfile] = useState<UserProfile | null>(null);
+  const [unlockingProfile, setUnlockingProfile] = useState<UserProfile | null>(null);
+
+  // Profile forms & security states
+  const [profileName, setProfileName] = useState('');
+  const [selectedEmoji, setSelectedEmoji] = useState('🌊');
+  const [selectedColor, setSelectedColor] = useState('from-blue-600 to-indigo-600');
+  const [requirePin, setRequirePin] = useState(false);
+  const [profilePin, setProfilePin] = useState('');
+  const [enteredPin, setEnteredPin] = useState('');
+  const [pinError, setPinError] = useState(false);
+
   // Navigation & session state
   const [viewMode, setViewMode] = useState<'landing' | 'chat'>('landing');
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -32,33 +58,204 @@ export default function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load sessions from LocalStorage on mount
+  // Load profiles on mount
   useEffect(() => {
     try {
-      const stored = localStorage.getItem('wave_ai_sessions');
-      if (stored) {
-        const parsed = JSON.parse(stored) as ChatSession[];
-        if (parsed.length > 0) {
-          setSessions(parsed);
-          // Auto-select the most recent session
-          const sorted = [...parsed].sort((a, b) => b.createdAt - a.createdAt);
-          setCurrentSessionId(sorted[0].id);
-          setViewMode('chat');
+      const storedProfiles = localStorage.getItem('wave_ai_profiles');
+      if (storedProfiles) {
+        const parsedProfiles = JSON.parse(storedProfiles) as UserProfile[];
+        setProfiles(parsedProfiles);
+        
+        const activeProfileId = localStorage.getItem('wave_ai_active_profile_id');
+        if (activeProfileId) {
+          const profile = parsedProfiles.find(p => p.id === activeProfileId);
+          if (profile) {
+            if (profile.pin) {
+              setUnlockingProfile(profile);
+              setShowProfileSelector(true);
+            } else {
+              setActiveProfile(profile);
+              setShowProfileSelector(false);
+            }
+          }
         }
       }
     } catch (e) {
-      console.error('Failed to load sessions from local storage', e);
+      console.error('Failed to load profiles', e);
     }
   }, []);
+
+  // Load sessions when activeProfile changes
+  useEffect(() => {
+    if (!activeProfile) {
+      setSessions([]);
+      setCurrentSessionId(null);
+      setViewMode('landing');
+      return;
+    }
+    try {
+      const stored = localStorage.getItem(`wave_ai_sessions_${activeProfile.id}`);
+      if (stored) {
+        const parsed = JSON.parse(stored) as ChatSession[];
+        setSessions(parsed);
+        if (parsed.length > 0) {
+          const sorted = [...parsed].sort((a, b) => b.createdAt - a.createdAt);
+          setCurrentSessionId(sorted[0].id);
+          setViewMode('chat');
+        } else {
+          setCurrentSessionId(null);
+          setViewMode('landing');
+        }
+      } else {
+        setSessions([]);
+        setCurrentSessionId(null);
+        setViewMode('landing');
+      }
+    } catch (e) {
+      console.error(`Failed to load sessions for profile ${activeProfile.name}`, e);
+    }
+  }, [activeProfile]);
 
   // Save sessions to LocalStorage when they change
   const saveSessions = (updated: ChatSession[]) => {
     setSessions(updated);
+    if (!activeProfile) return;
     try {
-      localStorage.setItem('wave_ai_sessions', JSON.stringify(updated));
+      localStorage.setItem(`wave_ai_sessions_${activeProfile.id}`, JSON.stringify(updated));
     } catch (e) {
       console.error('Failed to save sessions to local storage', e);
     }
+  };
+
+  // Create or Update Profile
+  const handleSaveProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!profileName.trim()) return;
+
+    let updatedProfiles = [...profiles];
+    const pinToSave = requirePin ? profilePin : undefined;
+
+    if (profileModalMode === 'create') {
+      const newProfile: UserProfile = {
+        id: Date.now().toString(),
+        name: profileName.trim(),
+        avatarEmoji: selectedEmoji,
+        avatarColor: selectedColor,
+        pin: pinToSave,
+        createdAt: Date.now(),
+      };
+      updatedProfiles = [...updatedProfiles, newProfile];
+      // Automatically log in to the newly created profile
+      setActiveProfile(newProfile);
+      localStorage.setItem('wave_ai_active_profile_id', newProfile.id);
+      setShowProfileSelector(false);
+    } else if (profileModalMode === 'edit' && editingProfile) {
+      updatedProfiles = profiles.map(p => 
+        p.id === editingProfile.id
+          ? { ...p, name: profileName.trim(), avatarEmoji: selectedEmoji, avatarColor: selectedColor, pin: pinToSave }
+          : p
+      );
+      // Update activeProfile if it is the one being edited
+      if (activeProfile && activeProfile.id === editingProfile.id) {
+        setActiveProfile({ ...activeProfile, name: profileName.trim(), avatarEmoji: selectedEmoji, avatarColor: selectedColor, pin: pinToSave });
+      }
+    }
+
+    setProfiles(updatedProfiles);
+    localStorage.setItem('wave_ai_profiles', JSON.stringify(updatedProfiles));
+    
+    // Close modal and reset fields
+    setProfileModalMode(null);
+    setEditingProfile(null);
+    setProfileName('');
+    setProfilePin('');
+    setRequirePin(false);
+  };
+
+  // Delete Profile
+  const handleDeleteProfile = (profileId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    if (!window.confirm('Are you sure you want to delete this profile and all its chat history?')) {
+      return;
+    }
+
+    const updatedProfiles = profiles.filter(p => p.id !== profileId);
+    setProfiles(updatedProfiles);
+    localStorage.setItem('wave_ai_profiles', JSON.stringify(updatedProfiles));
+
+    // Clear sessions for that profile
+    localStorage.removeItem(`wave_ai_sessions_${profileId}`);
+
+    // If deleting the active profile, log out
+    if (activeProfile && activeProfile.id === profileId) {
+      handleLogout();
+    }
+    
+    // If we were editing this profile, close the modal
+    if (editingProfile && editingProfile.id === profileId) {
+      setProfileModalMode(null);
+      setEditingProfile(null);
+    }
+  };
+
+  // Profile Switching & Authentication
+  const handleSelectProfile = (profile: UserProfile) => {
+    if (profile.pin) {
+      setUnlockingProfile(profile);
+      setEnteredPin('');
+      setPinError(false);
+    } else {
+      setActiveProfile(profile);
+      localStorage.setItem('wave_ai_active_profile_id', profile.id);
+      setShowProfileSelector(false);
+    }
+  };
+
+  const handleUnlockProfile = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!unlockingProfile) return;
+
+    if (enteredPin === unlockingProfile.pin) {
+      setActiveProfile(unlockingProfile);
+      localStorage.setItem('wave_ai_active_profile_id', unlockingProfile.id);
+      setShowProfileSelector(false);
+      setUnlockingProfile(null);
+      setEnteredPin('');
+      setPinError(false);
+    } else {
+      setPinError(true);
+      setEnteredPin('');
+      setTimeout(() => setPinError(false), 800);
+    }
+  };
+
+  const handleLogout = () => {
+    setActiveProfile(null);
+    localStorage.removeItem('wave_ai_active_profile_id');
+    setShowProfileSelector(true);
+    setViewMode('landing');
+  };
+
+  const startEditProfile = (profile: UserProfile, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingProfile(profile);
+    setProfileName(profile.name);
+    setSelectedEmoji(profile.avatarEmoji);
+    setSelectedColor(profile.avatarColor);
+    setRequirePin(!!profile.pin);
+    setProfilePin(profile.pin || '');
+    setProfileModalMode('edit');
+  };
+
+  const startCreateProfile = () => {
+    setEditingProfile(null);
+    setProfileName('');
+    setSelectedEmoji('🌊');
+    setSelectedColor('from-blue-600 to-indigo-600');
+    setRequirePin(false);
+    setProfilePin('');
+    setProfileModalMode('create');
   };
 
   // Scroll to bottom when messages update
@@ -650,6 +847,34 @@ export default function Chat() {
                 </button>
               </div>
 
+              {/* Active Profile Info */}
+              {activeProfile && (
+                <div className="mx-4 my-2 p-3 rounded-xl bg-white/70 border border-blue-100 flex items-center justify-between shadow-sm">
+                  <div className="flex items-center space-x-2.5 overflow-hidden">
+                    <div className={`w-8 h-8 rounded-full bg-gradient-to-br ${activeProfile.avatarColor} p-[1.5px] flex-shrink-0`}>
+                      <div className="w-full h-full bg-[#050b18] rounded-full flex items-center justify-center text-sm select-none">
+                        {activeProfile.avatarEmoji}
+                      </div>
+                    </div>
+                    <div className="overflow-hidden">
+                      <div className="text-[10px] text-blue-500 font-mono uppercase tracking-wider">Active Space</div>
+                      <div className="text-xs font-bold text-slate-800 truncate leading-tight">{activeProfile.name}</div>
+                    </div>
+                  </div>
+                  
+                  {/* Switch/Logout Action */}
+                  <button
+                    onClick={handleLogout}
+                    className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-blue-600 transition-colors"
+                    title="Switch Profile"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+
               {/* Sidebar Action Button */}
               <div className="p-4">
                 <button
@@ -723,7 +948,7 @@ export default function Chat() {
                   onClick={() => setSidebarOpen(!sidebarOpen)}
                   className="p-2 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200/60 text-blue-600 hover:text-blue-800 transition-colors"
                 >
-                  {/* Burger menu dynamic toggle */}
+                  {/* Burger menu toggle */}
                   {sidebarOpen ? (
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h8m-8 6h16" />
@@ -743,6 +968,13 @@ export default function Chat() {
               </div>
               
               <div className="flex items-center space-x-3">
+                {activeProfile && (
+                  <div className={`w-7 h-7 rounded-full bg-gradient-to-br ${activeProfile.avatarColor} p-[1.5px] flex items-center justify-center`} title={`${activeProfile.name}'s Space`}>
+                    <div className="w-full h-full bg-[#050b18] rounded-full flex items-center justify-center text-[10px]">
+                      {activeProfile.avatarEmoji}
+                    </div>
+                  </div>
+                )}
                 <img src="/logo.png" alt="Wave Logo" className="w-6 h-6 object-contain hidden md:block" />
               </div>
             </header>
@@ -834,7 +1066,7 @@ export default function Chat() {
                           : 'bg-white border border-blue-100/80 text-slate-800 shadow-sm'
                       }`}
                     >
-                      {/* Message Content Renderer (handles markdown + custom tool widgets) */}
+                      {/* Message Content Renderer */}
                       {m.role === 'user' ? (
                         <div className="text-sm whitespace-pre-wrap leading-relaxed">{m.content}</div>
                       ) : (
@@ -866,7 +1098,6 @@ export default function Chat() {
             {/* CHAT INPUT CONTAINER */}
             <div className="flex-shrink-0 p-4 md:p-6 border-t border-blue-100 bg-[#edf4fa]/60 backdrop-blur-sm">
               <form onSubmit={onSubmit} className="max-w-4xl mx-auto">
-                {/* Main input layout wrapper */}
                 <div className="bg-white border border-blue-200/80 rounded-2xl flex items-end p-2.5 space-x-2 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100/50 transition-all shadow-sm">
                   <textarea
                     ref={textareaRef}
@@ -888,10 +1119,8 @@ export default function Chat() {
                     className="p-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none disabled:cursor-not-allowed transition-all flex-shrink-0 flex items-center justify-center transform active:scale-95"
                   >
                     {isLoading ? (
-                      /* Spinner */
                       <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
                     ) : (
-                      /* Send SVG Icon */
                       <svg className="w-4 h-4 transform rotate-90" fill="currentColor" viewBox="0 0 24 24">
                         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
                       </svg>
@@ -911,7 +1140,6 @@ export default function Chat() {
           onClick={() => setLightboxImage(null)}
           className="fixed inset-0 bg-black/95 backdrop-blur-md z-50 flex flex-col items-center justify-center p-4 cursor-zoom-out animate-fade-in"
         >
-          {/* Close indicator floating */}
           <button
             onClick={() => setLightboxImage(null)}
             className="absolute top-6 right-6 p-3 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 text-white transition-all transform active:scale-95 z-55"
